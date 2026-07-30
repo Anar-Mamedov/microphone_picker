@@ -81,10 +81,14 @@ enum CoreAudioBridge {
 
     /// Cihazın giriş kapsamında en az bir kanalı var mı? (Yalnızca çıkış cihazlarını eler.)
     private static func hasInputChannels(_ deviceID: AudioDeviceID) -> Bool {
+        inputChannelCount(deviceID) > 0
+    }
+
+    static func inputChannelCount(_ deviceID: AudioDeviceID) -> Int {
         var address = makeAddress(kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr, size > 0 else {
-            return false
+            return 0
         }
 
         let buffer = UnsafeMutableRawPointer.allocate(
@@ -93,10 +97,10 @@ enum CoreAudioBridge {
         )
         defer { buffer.deallocate() }
 
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, buffer) == noErr else { return false }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, buffer) == noErr else { return 0 }
 
         let list = UnsafeMutableAudioBufferListPointer(buffer.assumingMemoryBound(to: AudioBufferList.self))
-        return list.contains { $0.mNumberChannels > 0 }
+        return list.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
     // MARK: - Varsayılan giriş cihazı
@@ -124,6 +128,76 @@ enum CoreAudioBridge {
         )
     }
 
+    // MARK: - Giriş seviyesi
+
+    private static func volumeAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: element
+        )
+    }
+
+    /// Seviyenin yazılabildiği elemanlar.
+    ///
+    /// Cihazların çoğunda tek bir "master" elemanı (0) vardır — sizin RØDE PodMic USB,
+    /// dahili mikrofon ve USB cihazınız bu gruptadır. Bazı ses arabirimleri master
+    /// sunmaz, yalnızca kanal başına kontrol verir; o durumda tüm kanallara yazarız.
+    static func volumeElements(_ deviceID: AudioDeviceID) -> [AudioObjectPropertyElement] {
+        let main = AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
+        if isVolumeSettable(deviceID, main) { return [main] }
+
+        let channels = max(inputChannelCount(deviceID), 1)
+        return (1...channels)
+            .map(AudioObjectPropertyElement.init)
+            .filter { isVolumeSettable(deviceID, $0) }
+    }
+
+    static func hasVolumeControl(_ deviceID: AudioDeviceID) -> Bool {
+        !volumeElements(deviceID).isEmpty
+    }
+
+    private static func isVolumeSettable(_ deviceID: AudioDeviceID, _ element: AudioObjectPropertyElement) -> Bool {
+        var address = volumeAddress(element)
+        guard AudioObjectHasProperty(deviceID, &address) else { return false }
+        var settable: DarwinBoolean = false
+        guard AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr else { return false }
+        return settable.boolValue
+    }
+
+    /// 0.0–1.0 aralığında, macOS'un giriş seviyesi kaydırıcısıyla aynı ölçek.
+    static func inputVolume(_ deviceID: AudioDeviceID) -> Float? {
+        guard let element = volumeElements(deviceID).first else { return nil }
+        var address = volumeAddress(element)
+        var value: Float = 0
+        var size = UInt32(MemoryLayout<Float>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value
+    }
+
+    @discardableResult
+    static func setInputVolume(_ deviceID: AudioDeviceID, _ value: Float) -> Bool {
+        let elements = volumeElements(deviceID)
+        guard !elements.isEmpty else { return false }
+
+        let clamped = min(max(value, 0), 1)
+        var wroteAny = false
+        for element in elements {
+            var address = volumeAddress(element)
+            var scalar = clamped
+            let status = AudioObjectSetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                UInt32(MemoryLayout<Float>.size),
+                &scalar
+            )
+            if status == noErr { wroteAny = true }
+        }
+        return wroteAny
+    }
+
     // MARK: - Dinleyiciler
 
     /// Sistem nesnesi üzerinde bir özelliği dinler. Geri çağırma ana kuyrukta çalışır.
@@ -135,6 +209,24 @@ enum CoreAudioBridge {
         let block: AudioObjectPropertyListenerBlock = { _, _ in handler() }
         let status = AudioObjectAddPropertyListenerBlock(systemObject, &address, DispatchQueue.main, block)
         return status == noErr ? block : nil
+    }
+
+    /// Belirli bir cihazın giriş seviyesini dinler. Sistem dinleyicilerinin aksine
+    /// bu, cihaz nesnesine bağlanır; cihaz yeniden bağlandığında `AudioDeviceID`
+    /// değiştiği için dinleyicinin sökülüp yeniden takılması gerekir.
+    static func addVolumeListener(
+        _ deviceID: AudioDeviceID,
+        handler: @escaping () -> Void
+    ) -> AudioObjectPropertyListenerBlock? {
+        var address = volumeAddress(kAudioObjectPropertyElementWildcard)
+        let block: AudioObjectPropertyListenerBlock = { _, _ in handler() }
+        let status = AudioObjectAddPropertyListenerBlock(deviceID, &address, DispatchQueue.main, block)
+        return status == noErr ? block : nil
+    }
+
+    static func removeVolumeListener(_ deviceID: AudioDeviceID, _ block: @escaping AudioObjectPropertyListenerBlock) {
+        var address = volumeAddress(kAudioObjectPropertyElementWildcard)
+        AudioObjectRemovePropertyListenerBlock(deviceID, &address, DispatchQueue.main, block)
     }
 
     // MARK: - Özellik yardımcıları

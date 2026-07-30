@@ -28,6 +28,9 @@ Menü çubuğundaki simgeye tıklayın:
 
 - **Giriş Cihazları** listesinden kilitlemek istediğiniz mikrofonu seçin. Seçtiğiniz
   anda hem sistem varsayılanı olur hem de kilitlenir.
+- **Ses Seviyesi** kaydırıcısı, kilitli mikrofonun giriş seviyesini gösterir.
+  Kaydırıcıyı oynattığınız anda o değer **o cihaz için** kaydedilir ve kilitlenir;
+  seviye düşerse otomatik geri çekilir. Kaldırmak için altındaki satıra tıklayın.
 - **Kilidi Kaldır** ile macOS'un normal (otomatik) davranışına dönersiniz.
 - **Oturum Açılışında Başlat** ile Mac her açıldığında uygulama kendiliğinden çalışır.
 - **Son işlem** satırı, en son ne zaman hangi cihazdan hangisine geri dönüldüğünü gösterir.
@@ -59,7 +62,35 @@ tekrar taktığınızda kilit hâlâ geçerlidir.
 Kilitli cihaz takılı değilse uygulama sisteme hiç karışmaz; cihaz geri geldiğinde
 kendiliğinden devreye girer.
 
+Uygulama başlarken **App Nap'ten çıkar** (`beginActivity`). Penceresiz menü çubuğu
+uygulamaları App Nap'in birinci hedefi ve App Nap zamanlayıcıları birleştirip
+dakikalarca geciktirebiliyor — bu düzeltme olmadan yukarıdaki 3. savunma hattı
+sessizce çalışmıyor. Sistemin boşta uykuya geçmesine karışılmaz.
+
 Boşta CPU kullanımı %0, bellek ~50 MB.
+
+### Seviye kilidi
+
+Hedef seviye **cihaz başına** saklanır (RØDE %90, dahili mikrofon %50, AirPods %70 —
+hepsi ayrı). Ama zorlama **yalnızca o an kilitli olan mikrofona** uygulanır: diğer
+cihazların değerleri hatırlanır, sistem onları kıssa bile uygulama karışmaz.
+
+Kilitli cihaz `kAudioDevicePropertyVolumeScalar` üzerinden dinlenir. Bu dinleyici
+sistem nesnesine değil cihazın kendisine bağlandığı için, cihaz her yeniden
+bağlandığında (`AudioDeviceID` değiştiğinde) sökülüp yeniden takılır.
+
+İki tasarım detayı önemli:
+
+- **Kuantalama toleransı.** Donanım, yazdığınız değeri en yakın adıma yuvarlar —
+  RØDE PodMic USB'de %90 yazıldığında cihaz %90.48'e oturuyor (22–63 dB aralığı ayrık
+  adımlarla ilerliyor). Tam eşitlik karşılaştırması yapılsaydı uygulama her turda
+  "eşit değil" deyip sonsuza kadar yazardı. Bunun yerine %1 tolerans kullanılıyor ve
+  cihazın oturduğu gerçek değer hedef kabul ediliyor.
+- **Savaş algılayıcı.** Zoom, Teams ve Discord'un otomatik mikrofon seviyesi (AGC)
+  ayarı sistem kaydırıcısını gerçekten oynatır. Karşılıklı itişme, kayıtta duyulabilir
+  seviye dalgalanmasına ve donanım gain'ine saniyede onlarca yazmaya yol açar.
+  3 saniye içinde 5 düzeltme gerekirse kilit 30 saniye duraklatılır ve menüde sebebi
+  yazar — çünkü kalıcı çözüm o uygulamanın kendi ayarında.
 
 ## Bilinmesi gerekenler
 
@@ -77,6 +108,10 @@ Boşta CPU kullanımı %0, bellek ~50 MB.
   değiştirir; bu yüzden TCC izni sormaz.
 - **Uygulamayı taşırsanız** (`/Applications` dışına), "Oturum Açılışında Başlat"
   ayarını kapatıp yeniden açın — kayıt uygulamanın yoluna bağlıdır.
+- **Seviye kilidi ancak kaydırıcıyı oynattıktan sonra devreye girer.** Menüyü açıp
+  hiçbir şey yapmazsanız seviyeye dokunulmaz.
+- **Her cihaz seviye kontrolü sunmaz.** Bazı USB mikrofonlarda macOS'un giriş
+  kaydırıcısı gri görünür; o cihazlarda menüde "seviye kontrolü sunmuyor" yazar.
 - macOS'un Ses Ayarları'nda göstermediği dahili birleşik cihazlar (`~:AMS2_Aggregate:*`,
   ör. "noise cancellation on") menüde listelenmez. Audio MIDI Setup'ta kendiniz
   oluşturduğunuz birleşik cihazlar listede görünür.
@@ -88,6 +123,8 @@ Sources/MicrophonePicker/
   main.swift             # Giriş noktası, .accessory (Dock simgesi yok)
   AppDelegate.swift      # Menü çubuğu öğesi ve menü
   MicrophoneLock.swift   # Kilit mantığı, dinleyiciler, nöbetçi zamanlayıcı
+  VolumeLock.swift       # Cihaz başına seviye hedefi, tolerans, savaş algılayıcı
+  VolumeSliderView.swift # Menüye gömülü kaydırıcı (yazma kısıtlamalı)
   CoreAudioBridge.swift  # CoreAudio HAL sarmalayıcısı
   LoginItem.swift        # SMAppService ile girişte başlatma
 Resources/Info.plist     # LSUIElement = true

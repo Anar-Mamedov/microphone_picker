@@ -1,12 +1,26 @@
 import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// Menü öğesi görünümlerinin genişliği (kaydırıcı satırı).
+    private static let menuWidth: CGFloat = 268
+
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let lock = MicrophoneLock()
+    private let volumeLock = VolumeLock()
     private var loginItemError: String?
+    private var activityToken: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // App Nap'ten çık. Menü çubuğu uygulamaları (LSUIElement, penceresiz) App Nap'in
+        // birinci hedefi; zamanlayıcılar birleştirilip dakikalarca geciktiriliyor.
+        // CoreAudio dinleyicileri dış olay olduğu için etkilenmiyordu, ama iki nöbetçi
+        // zamanlayıcımız da pratikte çalışmıyordu. Sistemin boşta uyumasına karışmıyoruz.
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Varsayılan mikrofon ve giriş seviyesi nöbeti"
+        )
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.toolTip = "Mikrofon Kilidi"
 
@@ -15,8 +29,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         statusItem.menu = menu
 
-        lock.onStateChange = { [weak self] in self?.updateStatusIcon() }
+        lock.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.updateStatusIcon()
+            // Seviye kilidi her zaman mikrofon kilidinin izlediği cihazı takip eder.
+            self.volumeLock.follow(self.lock.lockedDevice)
+        }
         lock.start()
+
+        volumeLock.follow(lock.lockedDevice)
+        volumeLock.start()
 
         updateStatusIcon()
     }
@@ -54,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         lock.refreshDevices()
+        volumeLock.follow(lock.lockedDevice)
         rebuild(menu)
     }
 
@@ -75,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(deviceItem(device))
             }
         }
+
+        menu.addItem(.separator())
+        appendVolumeSection(to: menu)
 
         menu.addItem(.separator())
 
@@ -111,6 +137,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let quit = NSMenuItem(title: "Çık", action: #selector(quitTapped), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    /// Seviye bölümü yalnızca kilitli mikrofon için gösterilir — zorlama da yalnızca
+    /// ona uygulanır. Diğer cihazların kayıtlı değerleri saklıdır ama onlara dokunulmaz.
+    private func appendVolumeSection(to menu: NSMenu) {
+        guard let device = lock.lockedDevice else {
+            menu.addItem(sectionItem("Ses Seviyesi"))
+            menu.addItem(disabledItem("Seviyeyi kilitlemek için önce bir mikrofon seçin"))
+            return
+        }
+
+        menu.addItem(sectionItem("Ses Seviyesi — \(device.name)"))
+
+        guard CoreAudioBridge.hasVolumeControl(device.id) else {
+            menu.addItem(disabledItem("Bu cihaz seviye kontrolü sunmuyor"))
+            return
+        }
+
+        let current = CoreAudioBridge.inputVolume(device.id) ?? 0
+        let sliderView = VolumeSliderView(value: current, width: Self.menuWidth)
+        sliderView.onCommit = { [weak self] value in
+            self?.volumeLock.setTarget(value, for: device)
+        }
+
+        let sliderItem = NSMenuItem()
+        sliderItem.view = sliderView
+        menu.addItem(sliderItem)
+
+        if let target = volumeLock.target(for: device.uid) {
+            let percent = Int((target * 100).rounded())
+            let release = NSMenuItem(
+                title: "Seviye kilidi: %\(percent) — kaldırmak için tıklayın",
+                action: #selector(clearVolumeTapped),
+                keyEquivalent: ""
+            )
+            release.target = self
+            release.attributedTitle = NSAttributedString(
+                string: release.title,
+                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+            )
+            menu.addItem(release)
+        } else {
+            menu.addItem(disabledItem("Kilitlemek için kaydırıcıyı oynatın"))
+        }
+
+        if let warning = volumeLock.warning {
+            menu.addItem(disabledItem("⚠︎ \(warning)"))
+        }
+        if let detail = volumeLock.warningDetail {
+            menu.addItem(disabledItem(detail))
+        }
     }
 
     private func headerItem() -> NSMenuItem {
@@ -187,6 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func unlockTapped() {
         lock.unlock()
+    }
+
+    @objc private func clearVolumeTapped() {
+        guard let device = lock.lockedDevice else { return }
+        volumeLock.clearTarget(for: device)
     }
 
     @objc private func loginItemTapped() {

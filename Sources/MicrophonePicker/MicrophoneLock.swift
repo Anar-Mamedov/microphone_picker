@@ -93,10 +93,14 @@ final class MicrophoneLock {
             listeners.append(block)
         }
 
-        watchdog = Timer.scheduledTimer(withTimeInterval: Self.watchdogInterval, repeats: true) { [weak self] _ in
+        // `.common` mod: menü açıkken run loop olay izleme moduna geçiyor ve
+        // `scheduledTimer`ın varsayılan modu duruyor — kilit o sırada nöbeti bırakmasın.
+        let timer = Timer(timeInterval: Self.watchdogInterval, repeats: true) { [weak self] _ in
             self?.enforce()
         }
-        watchdog?.tolerance = 0.25
+        timer.tolerance = 0.25
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
 
         enforce()
     }
