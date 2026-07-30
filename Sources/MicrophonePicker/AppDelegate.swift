@@ -182,8 +182,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disabledItem("Kilitlemek için kaydırıcıyı oynatın"))
         }
 
+        if let lastEvent = volumeLock.lastEvent {
+            menu.addItem(disabledItem("Son düzeltme: \(lastEvent)"))
+        }
         if let warning = volumeLock.warning {
             menu.addItem(disabledItem("⚠︎ \(warning)"))
+        }
+        if let suspects = volumeLock.warningSuspects {
+            menu.addItem(disabledItem(suspects))
         }
         if let detail = volumeLock.warningDetail {
             menu.addItem(disabledItem(detail))

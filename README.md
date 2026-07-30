@@ -92,6 +92,27 @@ bağlandığında (`AudioDeviceID` değiştiğinde) sökülüp yeniden takılır
   3 saniye içinde 5 düzeltme gerekirse kilit 30 saniye duraklatılır ve menüde sebebi
   yazar — çünkü kalıcı çözüm o uygulamanın kendi ayarında.
 
+### Kim değiştirdi?
+
+Her düzeltmede menüde şu satır belirir:
+
+```
+Son düzeltme: 14:32:07 · %50 → %90 · Wispr Flow
+```
+
+**CoreAudio, bir özelliği hangi işlemin değiştirdiğini söylemez** — böyle bir API yok.
+Bunun yerine, düzeltmenin yapıldığı anda **mikrofondan kayıt yapan** uygulamalar
+örneklenir (macOS 14.4+ Audio Process nesneleri). Seviyeyi oynatan uygulama neredeyse
+her zaman aynı anda kayıt da yapıyor olduğu için pratikte doğru adı verir; yine de bir
+çıkarımdır, o yüzden menüde "sürekli değiştiren" değil "mikrofonu kullanan" diye sunulur.
+
+Hiçbir uygulama kayıt yapmıyorken seviye değişiyorsa bu da bilgidir — menüde
+"mikrofonu kullanan uygulama yoktu" yazar ve sebep büyük ihtimalle bir sürücü ya da
+sistem ayarıdır.
+
+Yardımcı işlemler ana uygulamaya indirgenir: mikrofonu `com.google.Chrome.helper`
+açar ama menüde "Google Chrome" görürsünüz.
+
 ## Bilinmesi gerekenler
 
 - **Kilit açıkken Sistem Ayarları'ndan mikrofon değiştiremezsiniz** — uygulama geri
@@ -125,6 +146,7 @@ Sources/MicrophonePicker/
   MicrophoneLock.swift   # Kilit mantığı, dinleyiciler, nöbetçi zamanlayıcı
   VolumeLock.swift       # Cihaz başına seviye hedefi, tolerans, savaş algılayıcı
   VolumeSliderView.swift # Menüye gömülü kaydırıcı (yazma kısıtlamalı)
+  AudioProcesses.swift   # "Mikrofonu şu an kim kullanıyor?" (macOS 14.4+)
   CoreAudioBridge.swift  # CoreAudio HAL sarmalayıcısı
   LoginItem.swift        # SMAppService ile girişte başlatma
 Resources/Info.plist     # LSUIElement = true

@@ -29,7 +29,11 @@ final class VolumeLock {
 
     /// Kilit uygulanan cihaz — mikrofon kilidiyle senkron tutulur.
     private(set) var device: AudioInputDevice?
+
+    /// Son düzeltme: ne zaman, hangi seviyeden hangisine, o sırada mikrofonu kim kullanıyordu.
+    private(set) var lastEvent: String?
     private(set) var warning: String?
+    private(set) var warningSuspects: String?
     private(set) var warningDetail: String?
 
     private var listener: AudioObjectPropertyListenerBlock?
@@ -40,6 +44,8 @@ final class VolumeLock {
     private var settled: Float?
     private var corrections: [Date] = []
     private var pausedUntil: Date?
+    /// Çekişme penceresi boyunca mikrofonu kullanırken yakalanan uygulamalar.
+    private var suspects: Set<String> = []
 
     private let defaults = UserDefaults.standard
 
@@ -65,11 +71,8 @@ final class VolumeLock {
         updated[device.uid] = min(max(value, 0), 1)
         targets = updated
 
+        resetDiagnostics()
         settled = nil
-        corrections.removeAll()
-        pausedUntil = nil
-        warning = nil
-        warningDetail = nil
 
         CoreAudioBridge.setInputVolume(device.id, value)
         settled = CoreAudioBridge.inputVolume(device.id)
@@ -81,12 +84,19 @@ final class VolumeLock {
         updated.removeValue(forKey: device.uid)
         targets = updated
 
+        resetDiagnostics()
         settled = nil
+        lastEvent = nil
+        onStateChange?()
+    }
+
+    private func resetDiagnostics() {
         corrections.removeAll()
+        suspects.removeAll()
         pausedUntil = nil
         warning = nil
+        warningSuspects = nil
         warningDetail = nil
-        onStateChange?()
     }
 
     // MARK: - Yaşam döngüsü
@@ -114,8 +124,8 @@ final class VolumeLock {
 
         device = newDevice
         settled = nil
-        corrections.removeAll()
-        pausedUntil = nil
+        lastEvent = nil
+        resetDiagnostics()
 
         guard let newDevice else {
             onStateChange?()
@@ -150,21 +160,55 @@ final class VolumeLock {
         guard CoreAudioBridge.setInputVolume(device.id, target) else { return }
         settled = CoreAudioBridge.inputVolume(device.id) ?? target
 
-        recordCorrection(from: current)
+        // Suçluyu tam düzeltme anında örnekle — seviyeyi oynatan uygulama
+        // neredeyse her zaman o sırada kayıt da yapıyor olur.
+        let capturing = AudioProcesses.capturingInput()
+        recordCorrection(from: current, to: target, capturing: capturing)
         onStateChange?()
     }
 
-    private func recordCorrection(from previous: Float) {
+    private func recordCorrection(from previous: Float, to target: Float, capturing: [String]) {
         let now = Date()
+
+        lastEvent = "\(Self.timestamp(now)) · \(Self.percent(previous)) → \(Self.percent(target))"
+            + (capturing.isEmpty ? "" : " · \(capturing.joined(separator: ", "))")
+
         corrections.append(now)
         corrections.removeAll { now.timeIntervalSince($0) > Self.fightWindow }
+        suspects.formUnion(capturing)
 
         guard corrections.count >= Self.fightThreshold else { return }
 
+        let count = corrections.count
+        let caught = suspects.sorted()
         corrections.removeAll()
+        suspects.removeAll()
         pausedUntil = now.addingTimeInterval(Self.cooldown)
-        warning = "Bir uygulama seviyeyi sürekli değiştiriyor (%\(Int((previous * 100).rounded())))"
-        warningDetail = "Kilit \(Int(Self.cooldown)) sn duraklatıldı. Kalıcı çözüm: "
-            + "o uygulamanın kendi otomatik mikrofon ayarını kapatın."
+
+        // Sayıya göre değişen Türkçe ekten kaçınmak için "%50 yapıldı" biçimi
+        // kullanılıyor — "%50'ye" / "%90'a" / "%100'e" hepsi farklı ek alıyor.
+        warning = "Seviye çekişmesi: \(Int(Self.fightWindow)) sn içinde \(count) düzeltme "
+            + "(son müdahale \(Self.percent(previous))) — kilit \(Int(Self.cooldown)) sn duraklatıldı"
+
+        if caught.isEmpty {
+            warningSuspects = "O sırada mikrofonu kullanan uygulama yoktu — "
+                + "bir sürücü ya da sistem ayarı olabilir"
+            warningDetail = nil
+        } else {
+            warningSuspects = "O sırada mikrofonu kullanan: \(caught.joined(separator: ", "))"
+            warningDetail = caught.count == 1
+                ? "Kalıcı çözüm: \(caught[0]) içindeki otomatik mikrofon seviyesi ayarını kapatın."
+                : "Kalıcı çözüm: bu uygulamaların otomatik mikrofon seviyesi ayarını kapatın."
+        }
+    }
+
+    private static func percent(_ value: Float) -> String {
+        "%\(Int((value * 100).rounded()))"
+    }
+
+    private static func timestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
     }
 }
