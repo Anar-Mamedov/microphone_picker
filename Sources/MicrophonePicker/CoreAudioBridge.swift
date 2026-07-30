@@ -128,47 +128,63 @@ enum CoreAudioBridge {
         )
     }
 
-    // MARK: - Giriş seviyesi
+    // MARK: - Giriş kontrolleri (seviye ve susturma)
 
-    private static func volumeAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+    static func inputAddress(
+        _ selector: AudioObjectPropertySelector,
+        _ element: AudioObjectPropertyElement
+    ) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeInput,
             mElement: element
         )
     }
 
-    /// Seviyenin yazılabildiği elemanlar.
+    /// Bir kontrolün yazılabildiği elemanlar.
     ///
-    /// Cihazların çoğunda tek bir "master" elemanı (0) vardır — sizin RØDE PodMic USB,
-    /// dahili mikrofon ve USB cihazınız bu gruptadır. Bazı ses arabirimleri master
-    /// sunmaz, yalnızca kanal başına kontrol verir; o durumda tüm kanallara yazarız.
-    static func volumeElements(_ deviceID: AudioDeviceID) -> [AudioObjectPropertyElement] {
+    /// Cihazların çoğunda tek bir "master" elemanı (0) vardır — RØDE PodMic USB,
+    /// dahili mikrofon ve diğer USB cihaz seviye için bu gruptadır. Bazı ses
+    /// arabirimleri master sunmaz, yalnızca kanal başına kontrol verir; o durumda
+    /// tüm kanallara yazarız. Kontrolü hiç sunmayan cihazlarda liste boş döner —
+    /// ör. RØDE PodMic USB'de susturma kontrolü yoktur.
+    private static func settableElements(
+        _ deviceID: AudioDeviceID,
+        _ selector: AudioObjectPropertySelector
+    ) -> [AudioObjectPropertyElement] {
         let main = AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
-        if isVolumeSettable(deviceID, main) { return [main] }
+        if isSettable(deviceID, selector, main) { return [main] }
 
         let channels = max(inputChannelCount(deviceID), 1)
         return (1...channels)
             .map(AudioObjectPropertyElement.init)
-            .filter { isVolumeSettable(deviceID, $0) }
+            .filter { isSettable(deviceID, selector, $0) }
     }
 
-    static func hasVolumeControl(_ deviceID: AudioDeviceID) -> Bool {
-        !volumeElements(deviceID).isEmpty
-    }
-
-    private static func isVolumeSettable(_ deviceID: AudioDeviceID, _ element: AudioObjectPropertyElement) -> Bool {
-        var address = volumeAddress(element)
+    private static func isSettable(
+        _ deviceID: AudioDeviceID,
+        _ selector: AudioObjectPropertySelector,
+        _ element: AudioObjectPropertyElement
+    ) -> Bool {
+        var address = inputAddress(selector, element)
         guard AudioObjectHasProperty(deviceID, &address) else { return false }
         var settable: DarwinBoolean = false
         guard AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr else { return false }
         return settable.boolValue
     }
 
+    // MARK: Seviye
+
+    static func hasVolumeControl(_ deviceID: AudioDeviceID) -> Bool {
+        !settableElements(deviceID, kAudioDevicePropertyVolumeScalar).isEmpty
+    }
+
     /// 0.0–1.0 aralığında, macOS'un giriş seviyesi kaydırıcısıyla aynı ölçek.
     static func inputVolume(_ deviceID: AudioDeviceID) -> Float? {
-        guard let element = volumeElements(deviceID).first else { return nil }
-        var address = volumeAddress(element)
+        guard let element = settableElements(deviceID, kAudioDevicePropertyVolumeScalar).first else {
+            return nil
+        }
+        var address = inputAddress(kAudioDevicePropertyVolumeScalar, element)
         var value: Float = 0
         var size = UInt32(MemoryLayout<Float>.size)
         guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
@@ -177,13 +193,13 @@ enum CoreAudioBridge {
 
     @discardableResult
     static func setInputVolume(_ deviceID: AudioDeviceID, _ value: Float) -> Bool {
-        let elements = volumeElements(deviceID)
+        let elements = settableElements(deviceID, kAudioDevicePropertyVolumeScalar)
         guard !elements.isEmpty else { return false }
 
         let clamped = min(max(value, 0), 1)
         var wroteAny = false
         for element in elements {
-            var address = volumeAddress(element)
+            var address = inputAddress(kAudioDevicePropertyVolumeScalar, element)
             var scalar = clamped
             let status = AudioObjectSetPropertyData(
                 deviceID,
@@ -192,6 +208,44 @@ enum CoreAudioBridge {
                 nil,
                 UInt32(MemoryLayout<Float>.size),
                 &scalar
+            )
+            if status == noErr { wroteAny = true }
+        }
+        return wroteAny
+    }
+
+    // MARK: Susturma
+
+    static func hasMuteControl(_ deviceID: AudioDeviceID) -> Bool {
+        !settableElements(deviceID, kAudioDevicePropertyMute).isEmpty
+    }
+
+    /// Kontrolü olmayan cihazlarda `nil` döner — "susturulmamış" ile karıştırılmamalı.
+    static func isInputMuted(_ deviceID: AudioDeviceID) -> Bool? {
+        guard let element = settableElements(deviceID, kAudioDevicePropertyMute).first else { return nil }
+        var address = inputAddress(kAudioDevicePropertyMute, element)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value != 0
+    }
+
+    @discardableResult
+    static func setInputMuted(_ deviceID: AudioDeviceID, _ muted: Bool) -> Bool {
+        let elements = settableElements(deviceID, kAudioDevicePropertyMute)
+        guard !elements.isEmpty else { return false }
+
+        var wroteAny = false
+        for element in elements {
+            var address = inputAddress(kAudioDevicePropertyMute, element)
+            var value: UInt32 = muted ? 1 : 0
+            let status = AudioObjectSetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                UInt32(MemoryLayout<UInt32>.size),
+                &value
             )
             if status == noErr { wroteAny = true }
         }
@@ -211,21 +265,28 @@ enum CoreAudioBridge {
         return status == noErr ? block : nil
     }
 
-    /// Belirli bir cihazın giriş seviyesini dinler. Sistem dinleyicilerinin aksine
-    /// bu, cihaz nesnesine bağlanır; cihaz yeniden bağlandığında `AudioDeviceID`
-    /// değiştiği için dinleyicinin sökülüp yeniden takılması gerekir.
-    static func addVolumeListener(
+    /// Belirli bir cihazın giriş kontrolünü (seviye ya da susturma) dinler.
+    /// Sistem dinleyicilerinin aksine bu, cihaz nesnesine bağlanır; cihaz yeniden
+    /// bağlandığında `AudioDeviceID` değiştiği için sökülüp yeniden takılması gerekir.
+    /// Eleman joker karakteri kullanılır, böylece kanal başına kontrol veren
+    /// cihazlarda da her kanalın değişimi yakalanır.
+    static func addInputListener(
         _ deviceID: AudioDeviceID,
+        _ selector: AudioObjectPropertySelector,
         handler: @escaping () -> Void
     ) -> AudioObjectPropertyListenerBlock? {
-        var address = volumeAddress(kAudioObjectPropertyElementWildcard)
+        var address = inputAddress(selector, kAudioObjectPropertyElementWildcard)
         let block: AudioObjectPropertyListenerBlock = { _, _ in handler() }
         let status = AudioObjectAddPropertyListenerBlock(deviceID, &address, DispatchQueue.main, block)
         return status == noErr ? block : nil
     }
 
-    static func removeVolumeListener(_ deviceID: AudioDeviceID, _ block: @escaping AudioObjectPropertyListenerBlock) {
-        var address = volumeAddress(kAudioObjectPropertyElementWildcard)
+    static func removeInputListener(
+        _ deviceID: AudioDeviceID,
+        _ selector: AudioObjectPropertySelector,
+        _ block: @escaping AudioObjectPropertyListenerBlock
+    ) {
+        var address = inputAddress(selector, kAudioObjectPropertyElementWildcard)
         AudioObjectRemovePropertyListenerBlock(deviceID, &address, DispatchQueue.main, block)
     }
 

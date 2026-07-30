@@ -1,15 +1,22 @@
 import CoreAudio
 import Foundation
 
-/// Kilitli mikrofonun giriş seviyesini, kullanıcının o cihaz için belirlediği
-/// değerde tutar.
+/// Kilitli mikrofonun giriş seviyesini ve susturma durumunu, kullanıcının o cihaz
+/// için belirlediği hâlde tutar.
 ///
-/// Kapsam bilinçli olarak dar: hedef seviye **cihaz başına** saklanır, ama yalnızca
+/// Kapsam bilinçli olarak dar: ayarlar **cihaz başına** saklanır, ama yalnızca
 /// o an kilitli olan mikrofona uygulanır. Diğer cihazların kayıtlı değerleri
-/// hatırlanır; sistem onları kıssa bile bu sınıf karışmaz.
+/// hatırlanır; sistem onları kıssa ya da sustursa bile bu sınıf karışmaz.
 final class VolumeLock {
     private enum Keys {
         static let targets = "inputVolumeTargets"
+        static let preventMute = "preventMuteUIDs"
+    }
+
+    /// Bir düzeltmenin türü — menü mesajını ve çekişme uyarısını belirler.
+    private enum Correction {
+        case volume(from: Float, to: Float)
+        case unmute
     }
 
     /// Donanım, yazdığımız değeri en yakın adıma yuvarlar (RØDE'de 22–63 dB aralığı
@@ -36,7 +43,8 @@ final class VolumeLock {
     private(set) var warningSuspects: String?
     private(set) var warningDetail: String?
 
-    private var listener: AudioObjectPropertyListenerBlock?
+    private var volumeListener: AudioObjectPropertyListenerBlock?
+    private var muteListener: AudioObjectPropertyListenerBlock?
     private var listenerDeviceID: AudioDeviceID?
     private var watchdog: Timer?
 
@@ -63,6 +71,34 @@ final class VolumeLock {
 
     func target(for uid: String) -> Float? {
         targets[uid]
+    }
+
+    // MARK: - Susturma engeli
+
+    private var preventMuteUIDs: Set<String> {
+        get { Set(defaults.stringArray(forKey: Keys.preventMute) ?? []) }
+        set { defaults.set(Array(newValue).sorted(), forKey: Keys.preventMute) }
+    }
+
+    func preventsMute(for uid: String) -> Bool {
+        preventMuteUIDs.contains(uid)
+    }
+
+    func setPreventsMute(_ enabled: Bool, for device: AudioInputDevice) {
+        var updated = preventMuteUIDs
+        if enabled {
+            updated.insert(device.uid)
+        } else {
+            updated.remove(device.uid)
+        }
+        preventMuteUIDs = updated
+
+        resetDiagnostics()
+        if enabled {
+            // Şu an susturulmuşsa hemen aç — kullanıcı bunu bekler.
+            CoreAudioBridge.setInputMuted(device.id, false)
+        }
+        onStateChange?()
     }
 
     /// Kullanıcı kaydırıcıyı oynattı: değeri o cihaz için kaydet ve hemen uygula.
@@ -116,10 +152,16 @@ final class VolumeLock {
     func follow(_ newDevice: AudioInputDevice?) {
         guard newDevice?.id != listenerDeviceID else { return }
 
-        if let listenerDeviceID, let listener {
-            CoreAudioBridge.removeVolumeListener(listenerDeviceID, listener)
+        if let listenerDeviceID {
+            if let volumeListener {
+                CoreAudioBridge.removeInputListener(listenerDeviceID, kAudioDevicePropertyVolumeScalar, volumeListener)
+            }
+            if let muteListener {
+                CoreAudioBridge.removeInputListener(listenerDeviceID, kAudioDevicePropertyMute, muteListener)
+            }
         }
-        listener = nil
+        volumeListener = nil
+        muteListener = nil
         listenerDeviceID = nil
 
         device = newDevice
@@ -132,7 +174,10 @@ final class VolumeLock {
             return
         }
 
-        listener = CoreAudioBridge.addVolumeListener(newDevice.id) { [weak self] in
+        volumeListener = CoreAudioBridge.addInputListener(newDevice.id, kAudioDevicePropertyVolumeScalar) { [weak self] in
+            self?.enforce()
+        }
+        muteListener = CoreAudioBridge.addInputListener(newDevice.id, kAudioDevicePropertyMute) { [weak self] in
             self?.enforce()
         }
         listenerDeviceID = newDevice.id
@@ -144,13 +189,19 @@ final class VolumeLock {
     // MARK: - Uygulama
 
     private func enforce() {
-        guard let device, let target = targets[device.uid] else { return }
+        guard let device else { return }
 
         if let pausedUntil {
             guard Date() >= pausedUntil else { return }
             self.pausedUntil = nil
         }
 
+        enforceVolume(on: device)
+        enforceMute(on: device)
+    }
+
+    private func enforceVolume(on device: AudioInputDevice) {
+        guard let target = targets[device.uid] else { return }
         guard let current = CoreAudioBridge.inputVolume(device.id) else { return }
 
         // Hedefimiz, cihazın hedefe en yakın oturduğu gerçek değer.
@@ -160,17 +211,34 @@ final class VolumeLock {
         guard CoreAudioBridge.setInputVolume(device.id, target) else { return }
         settled = CoreAudioBridge.inputVolume(device.id) ?? target
 
-        // Suçluyu tam düzeltme anında örnekle — seviyeyi oynatan uygulama
-        // neredeyse her zaman o sırada kayıt da yapıyor olur.
-        let capturing = AudioProcesses.capturingInput()
-        recordCorrection(from: current, to: target, capturing: capturing)
+        recordCorrection(.volume(from: current, to: target))
         onStateChange?()
     }
 
-    private func recordCorrection(from previous: Float, to target: Float, capturing: [String]) {
-        let now = Date()
+    private func enforceMute(on device: AudioInputDevice) {
+        guard preventMuteUIDs.contains(device.uid) else { return }
+        // `nil` = cihazın susturma kontrolü yok; "susturulmamış" ile karıştırma.
+        guard CoreAudioBridge.isInputMuted(device.id) == true else { return }
+        guard CoreAudioBridge.setInputMuted(device.id, false) else { return }
 
-        lastEvent = "\(Self.timestamp(now)) · \(Self.percent(previous)) → \(Self.percent(target))"
+        recordCorrection(.unmute)
+        onStateChange?()
+    }
+
+    private func recordCorrection(_ correction: Correction) {
+        let now = Date()
+        // Suçluyu tam düzeltme anında örnekle — kontrolü oynatan uygulama
+        // neredeyse her zaman o sırada kayıt da yapıyor olur.
+        let capturing = AudioProcesses.capturingInput()
+
+        let summary: String
+        switch correction {
+        case .volume(let from, let to):
+            summary = "\(Self.percent(from)) → \(Self.percent(to))"
+        case .unmute:
+            summary = "susturma kaldırıldı"
+        }
+        lastEvent = "\(Self.timestamp(now)) · \(summary)"
             + (capturing.isEmpty ? "" : " · \(capturing.joined(separator: ", "))")
 
         corrections.append(now)
@@ -185,10 +253,20 @@ final class VolumeLock {
         suspects.removeAll()
         pausedUntil = now.addingTimeInterval(Self.cooldown)
 
-        // Sayıya göre değişen Türkçe ekten kaçınmak için "%50 yapıldı" biçimi
+        // Sayıya göre değişen Türkçe ekten kaçınmak için "son müdahale %50" biçimi
         // kullanılıyor — "%50'ye" / "%90'a" / "%100'e" hepsi farklı ek alıyor.
-        warning = "Seviye çekişmesi: \(Int(Self.fightWindow)) sn içinde \(count) düzeltme "
-            + "(son müdahale \(Self.percent(previous))) — kilit \(Int(Self.cooldown)) sn duraklatıldı"
+        let subject: String
+        let setting: String
+        switch correction {
+        case .volume(let from, _):
+            subject = "Seviye çekişmesi: \(Int(Self.fightWindow)) sn içinde \(count) düzeltme "
+                + "(son müdahale \(Self.percent(from)))"
+            setting = "otomatik mikrofon seviyesi"
+        case .unmute:
+            subject = "Susturma çekişmesi: \(Int(Self.fightWindow)) sn içinde \(count) kez susturuldu"
+            setting = "susturma"
+        }
+        warning = "\(subject) — kilit \(Int(Self.cooldown)) sn duraklatıldı"
 
         if caught.isEmpty {
             warningSuspects = "O sırada mikrofonu kullanan uygulama yoktu — "
@@ -197,8 +275,8 @@ final class VolumeLock {
         } else {
             warningSuspects = "O sırada mikrofonu kullanan: \(caught.joined(separator: ", "))"
             warningDetail = caught.count == 1
-                ? "Kalıcı çözüm: \(caught[0]) içindeki otomatik mikrofon seviyesi ayarını kapatın."
-                : "Kalıcı çözüm: bu uygulamaların otomatik mikrofon seviyesi ayarını kapatın."
+                ? "Kalıcı çözüm: \(caught[0]) içindeki \(setting) ayarını kapatın."
+                : "Kalıcı çözüm: bu uygulamaların \(setting) ayarını kapatın."
         }
     }
 

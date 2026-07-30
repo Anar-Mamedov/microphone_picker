@@ -143,44 +143,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// ona uygulanır. Diğer cihazların kayıtlı değerleri saklıdır ama onlara dokunulmaz.
     private func appendVolumeSection(to menu: NSMenu) {
         guard let device = lock.lockedDevice else {
-            menu.addItem(sectionItem("Ses Seviyesi"))
-            menu.addItem(disabledItem("Seviyeyi kilitlemek için önce bir mikrofon seçin"))
+            menu.addItem(sectionItem("Giriş Ayarları"))
+            menu.addItem(disabledItem("Seviye ve susturma kilidi için önce bir mikrofon seçin"))
             return
         }
 
-        menu.addItem(sectionItem("Ses Seviyesi — \(device.name)"))
+        menu.addItem(sectionItem("Giriş Ayarları — \(device.name)"))
 
-        guard CoreAudioBridge.hasVolumeControl(device.id) else {
-            menu.addItem(disabledItem("Bu cihaz seviye kontrolü sunmuyor"))
-            return
-        }
+        if CoreAudioBridge.hasVolumeControl(device.id) {
+            let current = CoreAudioBridge.inputVolume(device.id) ?? 0
+            let sliderView = VolumeSliderView(value: current, width: Self.menuWidth)
+            sliderView.onCommit = { [weak self] value in
+                self?.volumeLock.setTarget(value, for: device)
+            }
 
-        let current = CoreAudioBridge.inputVolume(device.id) ?? 0
-        let sliderView = VolumeSliderView(value: current, width: Self.menuWidth)
-        sliderView.onCommit = { [weak self] value in
-            self?.volumeLock.setTarget(value, for: device)
-        }
+            let sliderItem = NSMenuItem()
+            sliderItem.view = sliderView
+            menu.addItem(sliderItem)
 
-        let sliderItem = NSMenuItem()
-        sliderItem.view = sliderView
-        menu.addItem(sliderItem)
-
-        if let target = volumeLock.target(for: device.uid) {
-            let percent = Int((target * 100).rounded())
-            let release = NSMenuItem(
-                title: "Seviye kilidi: %\(percent) — kaldırmak için tıklayın",
-                action: #selector(clearVolumeTapped),
-                keyEquivalent: ""
-            )
-            release.target = self
-            release.attributedTitle = NSAttributedString(
-                string: release.title,
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
-            )
-            menu.addItem(release)
+            if let target = volumeLock.target(for: device.uid) {
+                let percent = Int((target * 100).rounded())
+                let release = NSMenuItem(
+                    title: "Seviye kilidi: %\(percent) — kaldırmak için tıklayın",
+                    action: #selector(clearVolumeTapped),
+                    keyEquivalent: ""
+                )
+                release.target = self
+                release.attributedTitle = NSAttributedString(
+                    string: release.title,
+                    attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+                )
+                menu.addItem(release)
+            } else {
+                menu.addItem(disabledItem("Seviyeyi kilitlemek için kaydırıcıyı oynatın"))
+            }
         } else {
-            menu.addItem(disabledItem("Kilitlemek için kaydırıcıyı oynatın"))
+            menu.addItem(disabledItem("Bu cihaz seviye kontrolü sunmuyor"))
         }
+
+        menu.addItem(muteItem(for: device))
 
         if let lastEvent = volumeLock.lastEvent {
             menu.addItem(disabledItem("Son düzeltme: \(lastEvent)"))
@@ -194,6 +195,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let detail = volumeLock.warningDetail {
             menu.addItem(disabledItem(detail))
         }
+    }
+
+    /// Susturma kontrolü olmayan cihazlarda (ör. RØDE PodMic USB) seçenek gizlenmez,
+    /// pasif gösterilir — yoksa kullanıcı seçeneğin neden kaybolduğunu merak eder.
+    private func muteItem(for device: AudioInputDevice) -> NSMenuItem {
+        guard CoreAudioBridge.hasMuteControl(device.id) else {
+            return disabledItem("Susturulmasını engelle — bu cihazda susturma kontrolü yok")
+        }
+
+        let item = NSMenuItem(
+            title: "Susturulmasını engelle",
+            action: #selector(togglePreventMuteTapped),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.state = volumeLock.preventsMute(for: device.uid) ? .on : .off
+        return item
     }
 
     private func headerItem() -> NSMenuItem {
@@ -275,6 +293,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func clearVolumeTapped() {
         guard let device = lock.lockedDevice else { return }
         volumeLock.clearTarget(for: device)
+    }
+
+    @objc private func togglePreventMuteTapped() {
+        guard let device = lock.lockedDevice else { return }
+        volumeLock.setPreventsMute(!volumeLock.preventsMute(for: device.uid), for: device)
     }
 
     @objc private func loginItemTapped() {

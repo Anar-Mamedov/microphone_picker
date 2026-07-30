@@ -28,9 +28,13 @@ Menü çubuğundaki simgeye tıklayın:
 
 - **Giriş Cihazları** listesinden kilitlemek istediğiniz mikrofonu seçin. Seçtiğiniz
   anda hem sistem varsayılanı olur hem de kilitlenir.
-- **Ses Seviyesi** kaydırıcısı, kilitli mikrofonun giriş seviyesini gösterir.
-  Kaydırıcıyı oynattığınız anda o değer **o cihaz için** kaydedilir ve kilitlenir;
-  seviye düşerse otomatik geri çekilir. Kaldırmak için altındaki satıra tıklayın.
+- **Giriş Ayarları** bölümündeki kaydırıcı, kilitli mikrofonun giriş seviyesini
+  gösterir. Kaydırıcıyı oynattığınız anda o değer **o cihaz için** kaydedilir ve
+  kilitlenir; seviye düşerse otomatik geri çekilir. Kaldırmak için altındaki satıra
+  tıklayın.
+- **Susturulmasını engelle** işaretliyken, bir uygulama kilitli mikrofonu susturursa
+  otomatik geri açılır. Bu ayar da cihaz başına saklanır. Susturma kontrolü sunmayan
+  cihazlarda (RØDE PodMic USB bunlardan biri) seçenek pasif görünür.
 - **Kilidi Kaldır** ile macOS'un normal (otomatik) davranışına dönersiniz.
 - **Oturum Açılışında Başlat** ile Mac her açıldığında uygulama kendiliğinden çalışır.
 - **Son işlem** satırı, en son ne zaman hangi cihazdan hangisine geri dönüldüğünü gösterir.
@@ -69,15 +73,21 @@ sessizce çalışmıyor. Sistemin boşta uykuya geçmesine karışılmaz.
 
 Boşta CPU kullanımı %0, bellek ~50 MB.
 
-### Seviye kilidi
+### Seviye ve susturma kilidi
 
-Hedef seviye **cihaz başına** saklanır (RØDE %90, dahili mikrofon %50, AirPods %70 —
+Ayarlar **cihaz başına** saklanır (RØDE %90, dahili mikrofon %50, AirPods %70 —
 hepsi ayrı). Ama zorlama **yalnızca o an kilitli olan mikrofona** uygulanır: diğer
-cihazların değerleri hatırlanır, sistem onları kıssa bile uygulama karışmaz.
+cihazların değerleri hatırlanır, sistem onları kıssa ya da sustursa bile uygulama
+karışmaz.
 
-Kilitli cihaz `kAudioDevicePropertyVolumeScalar` üzerinden dinlenir. Bu dinleyici
-sistem nesnesine değil cihazın kendisine bağlandığı için, cihaz her yeniden
-bağlandığında (`AudioDeviceID` değiştiğinde) sökülüp yeniden takılır.
+Kilitli cihaz `kAudioDevicePropertyVolumeScalar` ve `kAudioDevicePropertyMute`
+üzerinden dinlenir. Bu dinleyiciler sistem nesnesine değil cihazın kendisine
+bağlandığı için, cihaz her yeniden bağlandığında (`AudioDeviceID` değiştiğinde)
+sökülüp yeniden takılır.
+
+Her cihaz her kontrolü sunmaz — RØDE PodMic USB'de seviye kontrolü var ama
+**susturma kontrolü hiç yok**; dahili mikrofonda ve diğer USB cihazda ikisi de var.
+Kontrolü olmayan cihazlarda ilgili kilit sessizce devre dışı kalır, menüde sebebi yazar.
 
 İki tasarım detayı önemli:
 
@@ -90,7 +100,8 @@ bağlandığında (`AudioDeviceID` değiştiğinde) sökülüp yeniden takılır
   ayarı sistem kaydırıcısını gerçekten oynatır. Karşılıklı itişme, kayıtta duyulabilir
   seviye dalgalanmasına ve donanım gain'ine saniyede onlarca yazmaya yol açar.
   3 saniye içinde 5 düzeltme gerekirse kilit 30 saniye duraklatılır ve menüde sebebi
-  yazar — çünkü kalıcı çözüm o uygulamanın kendi ayarında.
+  yazar — çünkü kalıcı çözüm o uygulamanın kendi ayarında. Aynı mekanizma susturma
+  için de geçerlidir; duraklatma ikisi arasında paylaşılır.
 
 ### Kim değiştirdi?
 
